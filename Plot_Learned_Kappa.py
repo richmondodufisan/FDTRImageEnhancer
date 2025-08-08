@@ -35,22 +35,23 @@ mpl.rcParams.update({
 })
 
 # Plot
-plt.figure(figsize=(10, 6))
+plt.figure(figsize=(12, 6))
 plt.scatter(df['epoch'], df['kappa_left'], label=r'$\kappa_{left}$ (130 W/m·K)', color='red', s=8)
 plt.scatter(df['epoch'], df['kappa_right'], label=r'$\kappa_{right}$ (100 W/m·K)', color='blue', s=8)
 plt.scatter(df['epoch'], df['kappa_GB'], label=r'$\kappa_{GB}$ (75.5 W/m·K)', color='black', s=8)
 
-# Optional: add horizontal reference lines for ground truth
-plt.axhline(130, color='red', linestyle='--', linewidth=1)
-plt.axhline(100, color='blue', linestyle='--', linewidth=1)
-plt.axhline(75.5, color='black', linestyle='--', linewidth=1)
+# Ground truth horizontal lines with legend labels
+plt.axhline(130, color='red', linestyle='--', linewidth=2, label=r'Ground Truth $\kappa_{left}$')
+plt.axhline(100, color='blue', linestyle='--', linewidth=2, label=r'Ground Truth $\kappa_{right}$')
+plt.axhline(75.5, color='black', linestyle='--', linewidth=2, label=r'Ground Truth $\kappa_{GB}$')
 
 # Final touches
 plt.xlabel("Epoch")
 plt.ylabel("Thermal Conductivity (W/m·K)")
 plt.title("Evolution of Thermal Conductivity Estimates")
-plt.legend(loc='lower left')
+plt.legend(loc='center left', bbox_to_anchor=(1, 0.5))
 plt.grid(True)
 plt.tight_layout()
 plt.savefig("kappa_evolve.png")
 plt.show()
+
