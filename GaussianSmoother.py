@@ -14,7 +14,116 @@ import numpy as np
 
 
 
+# small, module-level caches so we don't rebuild stuff every step
+_GAUSS_KERNEL_CACHE = {}   # key: (sigma_eff, dtype, device) -> (k: [K], r)
+_INDEX_CACHE = {}          # key: (H, W, steps_y, steps_x, device) -> (y_idx, x_idx)
+
+def _sigma_eff(sigma_pump, sigma_probe, *, dtype, device):
+    s_p = torch.as_tensor(sigma_pump, dtype=dtype, device=device)
+    s_r = torch.as_tensor(sigma_probe, dtype=dtype, device=device)
+    # (1/σ_eff^2) = (1/σ_p^2) + (1/σ_r^2)
+    return ((1.0/(s_p*s_p) + 1.0/(s_r*s_r)) ** -0.5)
+
+def _get_cached_kernel(sigma_eff, dtype, device):
+    # round a bit to stabilize the cache key against tiny fp jitter
+    key = (float(torch.round(sigma_eff*1e6)/1e6), str(dtype), device)
+    if key in _GAUSS_KERNEL_CACHE:
+        return _GAUSS_KERNEL_CACHE[key]
+    r = int(torch.ceil(torch.tensor(4.0, dtype=dtype, device=device) * sigma_eff).item())
+    x = torch.arange(-r, r+1, device=device, dtype=dtype)
+    k = torch.exp(-(x*x) / (2*sigma_eff*sigma_eff))
+    k = k / k.sum()
+    _GAUSS_KERNEL_CACHE[key] = (k, r)
+    return k, r
+
+def _get_cached_indices(H, W, steps_y, steps_x, device):
+    key = (H, W, steps_y, steps_x, device)
+    if key in _INDEX_CACHE:
+        return _INDEX_CACHE[key]
+    y_idx = torch.linspace(0, H-1, steps_y, device=device).round().long()
+    x_idx = torch.linspace(0, W-1, steps_x, device=device).round().long()
+    _INDEX_CACHE[key] = (y_idx, x_idx)
+    return y_idx, x_idx
+
+def _separable_blur2d(xHW, k1d, r):
+    # xHW: [H,W]  --> returns blurred [H,W], fully differentiable
+    x = F.pad(xHW.unsqueeze(0).unsqueeze(0), (r, r, r, r), mode='reflect')
+    kv = k1d.view(1,1,-1,1)
+    kh = k1d.view(1,1,1,-1)
+    x = F.conv2d(x, kv)  # vertical 1-D
+    x = F.conv2d(x, kh)  # horizontal 1-D
+    return x[0,0]
+
+def _fft_blur2d(xHW, sigma_eff, r):
+    # 2-D FFT path for very large kernels (still autograd-friendly)
+    H, W = xHW.shape
+    y = torch.arange(-r, r+1, device=xHW.device, dtype=xHW.dtype)
+    x = torch.arange(-r, r+1, device=xHW.device, dtype=xHW.dtype)
+    Y, X = torch.meshgrid(y, x, indexing='ij')
+    k = torch.exp(-(X*X + Y*Y) / (2*sigma_eff*sigma_eff))
+    k = k / k.sum()
+
+    f = F.pad(xHW, (r, r, r, r), mode='reflect')
+    Ff = torch.fft.rfft2(f)
+
+    K = torch.zeros_like(f)
+    K[:2*r+1, :2*r+1] = k
+    K = torch.roll(K, shifts=(-r, -r), dims=(0,1))
+    FK = torch.fft.rfft2(K)
+
+    out = torch.fft.irfft2(Ff * FK, s=f.shape[-2:])
+    return out[r:H+r, r:W+r]
+# === END HELPERS ===
+
+
+
 def smooth_downsample_torch_from_tensor(param_map_full, steps_y, steps_x, sigma_pump=8.0, sigma_probe=9.0, device=None):
+    """
+    Fast Gaussian smoothing + downsample:
+    - Uses separable 1-D Gaussian passes (mathematically identical to 2-D Gaussian).
+    - Caches the 1-D kernel and the sampling indices.
+    - Automatically switches to FFT convolution for very large kernels.
+    Returns: torch.Tensor [steps_y, steps_x], keeps gradients.
+    """
+    if device is None:
+        device = param_map_full.device
+    assert param_map_full.dim() == 2, "param_map_full should be [H, W]"
+
+    # ensure tensor is on device/dtype we want
+    xHW = param_map_full.to(device)
+
+    H, W = xHW.shape
+    dtype = xHW.dtype
+
+    # 1) compute effective sigma for Gaussian × Gaussian (pump×probe)
+    sigma_eff = _sigma_eff(sigma_pump, sigma_probe, dtype=dtype, device=device)
+
+    # 2) get 1-D kernel (cached) and radius r = 4*sigma
+    k1d, r = _get_cached_kernel(sigma_eff, dtype, device)
+
+    # 3) choose separable or FFT path
+    if r > 128:  # threshold; tweak if you like
+        blurred = _fft_blur2d(xHW, sigma_eff, r)
+    else:
+        blurred = _separable_blur2d(xHW, k1d, r)
+
+    # 4) downsample by sampling blurred map at the same centers as before (cached)
+    y_idx, x_idx = _get_cached_indices(H, W, steps_y, steps_x, device)
+    return blurred.index_select(0, y_idx).index_select(1, x_idx)
+
+
+
+
+
+
+
+
+
+
+
+
+
+def smooth_downsample_torch_from_tensor_slow(param_map_full, steps_y, steps_x, sigma_pump=8.0, sigma_probe=9.0, device=None):
     
 
     # Performs Gaussian smoothing and downsampling on a full-resolution parameter map using a PyTorch tensor input.

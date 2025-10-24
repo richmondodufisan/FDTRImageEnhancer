@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 from GaussianSmoother import smooth_downsample_torch_from_tensor
 from torch.amp import GradScaler, autocast
+torch.backends.cudnn.benchmark = True  # lets cuDNN pick the fastest conv algo
+
 
 # Global style settings for publication-quality figures
 mpl.rcParams.update({
