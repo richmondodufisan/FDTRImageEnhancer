@@ -46,36 +46,44 @@ def _get_cached_indices(H, W, steps_y, steps_x, device):
     return y_idx, x_idx
 
 def _separable_blur2d(xHW, k1d, r):
-    # xHW: [H,W]  --> returns blurred [H,W], fully differentiable
-    # x = F.pad(xHW.unsqueeze(0).unsqueeze(0), (r, r, r, r), mode='reflect')
-    f = F.pad(xHW.unsqueeze(0).unsqueeze(0), (r, r, r, r), mode='reflect')[0, 0]
+    # xHW: [H, W]  --> returns blurred [H, W], fully differentiable
+    # Reflect pad expects NCHW; keep 4D for conv2d, then squeeze at the end.
+    x = F.pad(xHW.unsqueeze(0).unsqueeze(0), (r, r, r, r), mode='reflect')  # [1,1,H+2r,W+2r]
 
-    kv = k1d.view(1,1,-1,1)
-    kh = k1d.view(1,1,1,-1)
-    x = F.conv2d(x, kv)  # vertical 1-D
-    x = F.conv2d(x, kh)  # horizontal 1-D
-    return x[0,0]
+    kv = k1d.view(1, 1, -1, 1)  # vertical kernel
+    x = F.conv2d(x, kv)
+
+    kh = k1d.view(1, 1, 1, -1)  # horizontal kernel
+    x = F.conv2d(x, kh)
+
+    return x[0, 0]  # back to [H, W]
 
 def _fft_blur2d(xHW, sigma_eff, r):
     # 2-D FFT path for very large kernels (still autograd-friendly)
     H, W = xHW.shape
+
+    # Build 2D Gaussian kernel (no padding needed here)
     y = torch.arange(-r, r+1, device=xHW.device, dtype=xHW.dtype)
     x = torch.arange(-r, r+1, device=xHW.device, dtype=xHW.dtype)
     Y, X = torch.meshgrid(y, x, indexing='ij')
     k = torch.exp(-(X*X + Y*Y) / (2*sigma_eff*sigma_eff))
     k = k / k.sum()
 
-    f = F.pad(xHW, (r, r, r, r), mode='reflect')
-    Ff = torch.fft.rfft2(f)
+    # Reflect pad expects NCHW. Pad as 4D, then squeeze to 2D for FFT.
+    f4 = F.pad(xHW.unsqueeze(0).unsqueeze(0), (r, r, r, r), mode='reflect')  # [1,1,H+2r,W+2r]
+    f = f4[0, 0]  # [H+2r, W+2r]
 
+    # FFT-based convolution
+    Ff = torch.fft.rfft2(f)
     K = torch.zeros_like(f)
     K[:2*r+1, :2*r+1] = k
-    K = torch.roll(K, shifts=(-r, -r), dims=(0,1))
+    K = torch.roll(K, shifts=(-r, -r), dims=(0, 1))
     FK = torch.fft.rfft2(K)
 
     out = torch.fft.irfft2(Ff * FK, s=f.shape[-2:])
     return out[r:H+r, r:W+r]
-# === END HELPERS ===
+
+
 
 
 
