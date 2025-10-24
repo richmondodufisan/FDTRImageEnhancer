@@ -47,7 +47,9 @@ def _get_cached_indices(H, W, steps_y, steps_x, device):
 
 def _separable_blur2d(xHW, k1d, r):
     # xHW: [H,W]  --> returns blurred [H,W], fully differentiable
-    x = F.pad(xHW.unsqueeze(0).unsqueeze(0), (r, r, r, r), mode='reflect')
+    # x = F.pad(xHW.unsqueeze(0).unsqueeze(0), (r, r, r, r), mode='reflect')
+    f = F.pad(xHW.unsqueeze(0).unsqueeze(0), (r, r, r, r), mode='reflect')[0, 0]
+
     kv = k1d.view(1,1,-1,1)
     kh = k1d.view(1,1,1,-1)
     x = F.conv2d(x, kv)  # vertical 1-D
