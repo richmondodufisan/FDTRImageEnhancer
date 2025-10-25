@@ -321,7 +321,7 @@ if __name__ == "__main__":
     train_model(model, coords, freqs, region_map, region_map_flat, 
                 raw_phase_map_tensor, kappa_analytical, 
                 steps_y, steps_x, pixels_y, pixels_x,
-                epochs=1000000, lr=1e-2)
+                epochs=35000, lr=1e-2)
                 
     print("Final kappa values:", model.kappa.data.cpu().numpy())
     print("Final G value:", model.G.item())
