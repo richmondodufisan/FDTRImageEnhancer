@@ -2,8 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Structure Dimensions (Fictional EBSD Image)
-pixels_x = 10000
-pixels_y = 10000
+pixels_x = 1500
+pixels_y = 1500
 length_x = 36.0
 length_y = 36.0
 gb_thickness = 0.5  # physical thickness of the GB

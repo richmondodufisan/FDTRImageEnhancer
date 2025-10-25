@@ -18,6 +18,10 @@ kappa_map_full = np.zeros_like(region_map, dtype=np.float32)
 kappa_map_full[region_map == 0] = kappa_bulk
 kappa_map_full[region_map == 1] = kappa_gb
 
+H, W = kappa_map_full.shape
+min_dim = min(H, W)  # used in sigma guard: r = ceil(4*max_sigma) must be < min_dim
+
+
 
 def print_callback(xk):
     print(f"Step: sigma_pump={xk[0]:.4f}, sigma_probe={xk[1]:.4f}")
@@ -29,6 +33,10 @@ def sigma_loss(sigmas):
 
     # Enforce positivity
     if sigma_pump <= 0 or sigma_probe <= 0:
+        return 1e9
+        
+    # HARD GUARD to avoid calling pad/conv when radius would be invalid
+    if 4.0*max(sigma_pump, sigma_probe) >= (min_dim - 1):
         return 1e9
 
     try:
@@ -50,6 +58,7 @@ def sigma_loss(sigmas):
 # --- Run optimization ---
 initial_guess = [20.0, 20.0]
 result = minimize(sigma_loss, initial_guess, method='Nelder-Mead', callback=print_callback, options={'maxiter': 100})
+
 
 # --- Print and plot result ---
 print("Best sigmas found:", result.x)
