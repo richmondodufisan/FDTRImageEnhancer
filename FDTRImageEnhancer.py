@@ -151,8 +151,7 @@ def calc_physics_loss(model, region_map, kappa_analytical, steps_y, steps_x):
         kappa_map_full,
         steps_y=steps_y,
         steps_x=steps_x,
-        sigma_pump=346.88457173,
-        sigma_probe=320.35648512,
+        sigma_eff=246.99609375,
         device=device
     )
 

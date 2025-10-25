@@ -23,55 +23,70 @@ min_dim = min(H, W)  # used in sigma guard: r = ceil(4*max_sigma) must be < min_
 
 
 
-def print_callback(xk):
-    print(f"Step: sigma_pump={xk[0]:.4f}, sigma_probe={xk[1]:.4f}")
+def print_callback(se):
+    # se is a scalar when using 1-D optimization; handle array just in case
+    se_val = float(se[0]) if hasattr(se, "__len__") else float(se)
+    print(f"Step: sigma_eff={se_val:.6f} (pixels)")
+
 
 
 # --- Optimization objective ---
-def sigma_loss(sigmas):
-    sigma_pump, sigma_probe = sigmas
+def sigma_loss(sigma_eff):
+    # scalar sigma_eff in pixels
+    se = float(sigma_eff)
+    if se <= 0.0:
+        return 1e12
 
-    # Enforce positivity
-    if sigma_pump <= 0 or sigma_probe <= 0:
-        return 1e9
-        
-    # HARD GUARD to avoid calling pad/conv when radius would be invalid
-    if 4.0*max(sigma_pump, sigma_probe) >= (min_dim - 1):
-        return 1e9
+    # reflect-pad feasibility: r = ceil(4*se) < min_dim
+    if 4.0 * se >= (min_dim - 1):
+        return 1e12
 
     try:
+        # If your smoother still expects (sigma_pump, sigma_probe),
+        # pass sigma_eff to both:
         kappa_pred = smooth_downsample_torch(
             kappa_map_full,
             steps_y=kappa_analytical.shape[0],
             steps_x=kappa_analytical.shape[1],
-            sigma_pump=sigma_pump,
-            sigma_probe=sigma_probe,
-            device='cuda'  # GPU enabled
+            sigma_eff=se,
+            device='cuda'
         )
+        if hasattr(kappa_pred, "detach"):
+            kappa_pred = kappa_pred.detach().cpu().numpy()
         mse = np.mean((kappa_pred - kappa_analytical) ** 2)
         return mse
-    except Exception as e:
-        print(f"Failure for sigmas {sigmas}: {e}")
-        return 1e9
+    except Exception:
+        return 1e12
+
 
 
 # --- Run optimization ---
-initial_guess = [20.0, 20.0]
-result = minimize(sigma_loss, initial_guess, method='Nelder-Mead', callback=print_callback, options={'maxiter': 100})
+initial_guess = np.array([20.0])
+
+result = minimize(
+    lambda x: sigma_loss(x[0]),
+    initial_guess,
+    method='Nelder-Mead',
+    callback=print_callback,
+    options={'maxiter': 300, 'xatol': 1e-4, 'fatol': 1e-7, 'adaptive': True}
+)
+
 
 
 # --- Print and plot result ---
-print("Best sigmas found:", result.x)
-print("Final MSE:", result.fun)
+se = float(result.x[0])          
+print("Best sigma_eff (pixels):", se)
+print("Final MSE:", float(result.fun))
 
-# Visualize result
 kappa_final = smooth_downsample_torch(
     kappa_map_full,
     steps_y=kappa_analytical.shape[0],
     steps_x=kappa_analytical.shape[1],
-    sigma_pump=result.x[0],
-    sigma_probe=result.x[1]
+    sigma_eff=se,              
+    device='cuda'
 )
+
+
 
 
 # Global style settings for publication-quality figures
