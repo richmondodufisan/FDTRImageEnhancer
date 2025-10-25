@@ -88,13 +88,14 @@ def _fft_blur2d(xHW, sigma_eff, r):
 
 
 def smooth_downsample_torch_from_tensor(param_map_full, steps_y, steps_x, sigma_pump=8.0, sigma_probe=9.0, device=None):
-    """
-    Fast Gaussian smoothing + downsample:
-    - Uses separable 1-D Gaussian passes (mathematically identical to 2-D Gaussian).
-    - Caches the 1-D kernel and the sampling indices.
-    - Automatically switches to FFT convolution for very large kernels.
-    Returns: torch.Tensor [steps_y, steps_x], keeps gradients.
-    """
+
+    # Fast Gaussian smoothing + downsample:
+    # - Uses separable 1-D Gaussian passes (mathematically identical to 2-D Gaussian).
+    # - Caches the 1-D kernel and the sampling indices.
+    # - Automatically switches to FFT convolution for very large kernels.
+    # Returns: torch.Tensor [steps_y, steps_x], keeps gradients.
+    # Tested, significantly faster
+
     if device is None:
         device = param_map_full.device
     assert param_map_full.dim() == 2, "param_map_full should be [H, W]"
