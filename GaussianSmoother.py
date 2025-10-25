@@ -112,11 +112,14 @@ def smooth_downsample_torch_from_tensor(param_map_full, steps_y, steps_x, sigma_
     # 2) get 1-D kernel (cached) and radius r = 4*sigma
     k1d, r = _get_cached_kernel(sigma_eff, dtype, device)
 
-    # 3) choose separable or FFT path
-    if r > 128:  # threshold; tweak if you like
-        blurred = _fft_blur2d(xHW, sigma_eff, r)
-    else:
-        blurred = _separable_blur2d(xHW, k1d, r)
+    # # 3) choose separable or FFT path
+    # if r > 128:  # threshold; tweak if you like
+        # blurred = _fft_blur2d(xHW, sigma_eff, r)
+    # else:
+        # blurred = _separable_blur2d(xHW, k1d, r)
+        
+    # Dont use FFT blurring    
+    blurred =  _separable_blur2d(xHW, k1d, r)   
 
     # 4) downsample by sampling blurred map at the same centers as before (cached)
     y_idx, x_idx = _get_cached_indices(H, W, steps_y, steps_x, device)
