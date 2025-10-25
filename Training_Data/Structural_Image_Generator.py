@@ -2,8 +2,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # USER INPUTS
-pixels_x = 1000          # number of pixels in x-direction
-pixels_y = 1000          # number of pixels in y-direction
+pixels_x = 10000          # number of pixels in x-direction
+pixels_y = 10000          # number of pixels in y-direction
 length_x = 36.0         # physical length in x-direction
 length_y = 36.0         # physical length in y-direction
 gb_thickness = 0.1      # thickness of grain boundary
