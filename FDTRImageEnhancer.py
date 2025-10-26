@@ -151,7 +151,8 @@ def calc_physics_loss(model, region_map, kappa_analytical, steps_y, steps_x):
         kappa_map_full,
         steps_y=steps_y,
         steps_x=steps_x,
-        sigma_eff=246.99609375,
+        sigma_pump=113.4995,
+        sigma_probe=104.9994,
         device=device
     )
 
@@ -227,7 +228,7 @@ def visualize_params(model, region_map, pixels_y, pixels_x, epoch):
         plt.imshow(kappa_map_full, cmap='plasma', origin='lower')
         cbar = plt.colorbar(label="Predicted κ (W/(m·K))")
         cbar.ax.tick_params(labelsize=14)
-        plt.title(f"Thermal Conductivity (κ) Map (Epoch {epoch})\nPredicted G = {G_val:.2e}")
+        plt.title(f"Epoch {epoch} \nPredicted G = {G_val:.2e} W/(m²·K)")
         plt.axis('off')
 
         # Save
@@ -320,7 +321,7 @@ if __name__ == "__main__":
     train_model(model, coords, freqs, region_map, region_map_flat, 
                 raw_phase_map_tensor, kappa_analytical, 
                 steps_y, steps_x, pixels_y, pixels_x,
-                epochs=35000, lr=1e-2)
+                epochs=20000, lr=1e-2)
                 
     print("Final kappa values:", model.kappa.data.cpu().numpy())
     print("Final G value:", model.G.item())

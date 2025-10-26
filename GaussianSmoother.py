@@ -18,27 +18,23 @@ import numpy as np
 _GAUSS_KERNEL_CACHE = {}   # key: (sigma_eff, dtype, device) -> (k: [K], r)
 _INDEX_CACHE = {}          # key: (H, W, steps_y, steps_x, device) -> (y_idx, x_idx)
 
-def _max_reflect_radius(H: int, W: int) -> int:
-    # reflect pad requires r < min(H,W)
-    return min(H, W) - 1
-
+def _sigma_eff(sigma_pump, sigma_probe, *, dtype, device):
+    s_p = torch.as_tensor(sigma_pump, dtype=dtype, device=device)
+    s_r = torch.as_tensor(sigma_probe, dtype=dtype, device=device)
+    # (1/σ_eff^2) = (1/σ_p^2) + (1/σ_r^2)
+    return ((1.0/(s_p*s_p) + 1.0/(s_r*s_r)) ** -0.5)
 
 def _get_cached_kernel(sigma_eff, dtype, device):
-    # ensure tensor scalar on the right device/dtype
-    s = torch.as_tensor(sigma_eff, dtype=dtype, device=device)
-
     # round a bit to stabilize the cache key against tiny fp jitter
-    key = (float(torch.round(s * 1e6) / 1e6), str(dtype), device)
+    key = (float(torch.round(sigma_eff*1e6)/1e6), str(dtype), device)
     if key in _GAUSS_KERNEL_CACHE:
         return _GAUSS_KERNEL_CACHE[key]
-
-    r = int(torch.ceil(torch.tensor(4.0, dtype=dtype, device=device) * s).item())
-    x = torch.arange(-r, r + 1, device=device, dtype=dtype)
-    k = torch.exp(-(x * x) / (2 * s * s))
+    r = int(torch.ceil(torch.tensor(4.0, dtype=dtype, device=device) * sigma_eff).item())
+    x = torch.arange(-r, r+1, device=device, dtype=dtype)
+    k = torch.exp(-(x*x) / (2*sigma_eff*sigma_eff))
     k = k / k.sum()
     _GAUSS_KERNEL_CACHE[key] = (k, r)
     return k, r
-
 
 def _get_cached_indices(H, W, steps_y, steps_x, device):
     key = (H, W, steps_y, steps_x, device)
@@ -67,7 +63,7 @@ def _separable_blur2d(xHW, k1d, r):
 
 
 
-def smooth_downsample_torch_from_tensor(param_map_full, steps_y, steps_x, sigma_eff, device=None):
+def smooth_downsample_torch_from_tensor(param_map_full, steps_y, steps_x, sigma_pump=8.0, sigma_probe=9.0, device=None):
 
     # Fast Gaussian smoothing + downsample:
     # - Uses separable 1-D Gaussian passes (mathematically identical to 2-D Gaussian).
@@ -86,15 +82,11 @@ def smooth_downsample_torch_from_tensor(param_map_full, steps_y, steps_x, sigma_
     H, W = xHW.shape
     dtype = xHW.dtype
 
+    # 1) compute effective sigma for Gaussian × Gaussian (pump×probe)
+    sigma_eff = _sigma_eff(sigma_pump, sigma_probe, dtype=dtype, device=device)
+
     # 2) get 1-D kernel (cached) and radius r = 4*sigma
     k1d, r = _get_cached_kernel(sigma_eff, dtype, device)
-    
-    # Safety: reflect pad limit
-    if r >= _max_reflect_radius(H, W):
-        raise ValueError(f"Gaussian radius r={r} exceeds reflect-pad limit for {H}x{W}. "
-                         f"Use a smaller sigma_eff or normalize by image size.")
-
-
         
     # blur   
     blurred =  _separable_blur2d(xHW, k1d, r)   
@@ -115,7 +107,7 @@ def smooth_downsample_torch_from_tensor(param_map_full, steps_y, steps_x, sigma_
 
 
 
-def smooth_downsample_torch_from_tensor_slow(param_map_full, steps_y, steps_x, sigma_eff, device=None):
+def smooth_downsample_torch_from_tensor_slow(param_map_full, steps_y, steps_x, sigma_pump=8.0, sigma_probe=9.0, device=None):
     
 
     # Performs Gaussian smoothing and downsampling on a full-resolution parameter map using a PyTorch tensor input.
@@ -124,7 +116,7 @@ def smooth_downsample_torch_from_tensor_slow(param_map_full, steps_y, steps_x, s
     # Parameters:
     # - param_map_full: torch.Tensor of shape [H, W], requiring gradients
     # - steps_y, steps_x: target output shape
-    # - sigma_eff = gaussian standard deviation
+    # - sigma_pump, sigma_probe: Gaussian standard deviations
     # - device: CUDA/CPU
     
     # Returns:
@@ -134,27 +126,34 @@ def smooth_downsample_torch_from_tensor_slow(param_map_full, steps_y, steps_x, s
     if device is None:
         device = param_map_full.device
 
-    x = param_map_full.unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
-    H, W = x.shape[-2:]
+    param_map_full = param_map_full.unsqueeze(0).unsqueeze(0)  # shape: [1, 1, H, W]
+    pixels_y, pixels_x = param_map_full.shape[-2:]
 
-    r = int(np.ceil(4 * float(sigma_eff)))
-    if r >= _max_reflect_radius(H, W):
-        raise ValueError(f"Gaussian radius r={r} exceeds reflect-pad limit for {H}x{W}.")
+    # Define kernel
+    max_sigma = max(sigma_pump, sigma_probe)
+    r = int(np.ceil(4 * max_sigma))
+    kernel = gaussian_kernel_2d(sigma_pump, sigma_probe, r).to(device)
+    kernel = kernel.unsqueeze(0).unsqueeze(0)  # [1, 1, kH, kW]
 
-    kernel = gaussian_kernel_2d(sigma_eff, r).to(device).unsqueeze(0).unsqueeze(0)  # [1,1,kH,kW]
+    # Pad the input
+    pad = [r, r, r, r]  # left, right, top, bottom
+    param_padded = F.pad(param_map_full, pad, mode='reflect')
 
-    x = F.pad(x, [r, r, r, r], mode='reflect')
-    smoothed = F.conv2d(x, kernel)
+    # Convolve (Gaussian smoothing)
+    smoothed = F.conv2d(param_padded, kernel)
 
-    x_centers = torch.linspace(0, W-1, steps_x, device=device).round().long()
-    y_centers = torch.linspace(0, H-1, steps_y, device=device).round().long()
+    # Compute sampling coordinates
+    x_centers = torch.linspace(0, pixels_x - 1, steps_x, device=device).round().long()
+    y_centers = torch.linspace(0, pixels_y - 1, steps_y, device=device).round().long()
 
-    return smoothed[0,0][y_centers[:,None], x_centers[None,:]]
+    # Sample from smoothed output — maintains gradient flow
+    sampled = smoothed[0, 0][y_centers[:, None], x_centers[None, :]]
+    return sampled
 
 
 
 
-def gaussian_kernel_2d(sigma_eff, r):
+def gaussian_kernel_2d(sigma_pump, sigma_probe, r):
     
     # Construct a multiplicative pump × probe Gaussian kernel.
     
@@ -162,40 +161,193 @@ def gaussian_kernel_2d(sigma_eff, r):
     y, x = torch.meshgrid(torch.arange(-r, r + 1), torch.arange(-r, r + 1), indexing='ij')
     dist_sq = x**2 + y**2
 
-    kernel = torch.exp(-dist_sq / (2 * sigma_eff**2))
+    pump = torch.exp(-dist_sq / (2 * sigma_pump**2))
+    probe = torch.exp(-dist_sq / (2 * sigma_probe**2))
+    kernel = pump * probe
     kernel /= kernel.sum()  # Normalize to unit sum
     return kernel
     
 
 
+def smooth_downsample_torch(param_map_full_np, steps_y, steps_x, sigma_pump=8.0, sigma_probe=9.0, device=None):
+    
 
+    # PyTorch implementation of Gaussian smoothing and downsampling.
+    # Uses convolution for fast GPU execution.
 
-
-def smooth_downsample_torch(param_map_full_np, steps_y, steps_x, sigma_eff, device=None):
-    # NumPy in, NumPy out; single sigma_eff in pixels
+    
     if device is None:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    # Convert to torch tensor
+    param_map_full = torch.tensor(param_map_full_np, dtype=torch.float32, device=device).unsqueeze(0).unsqueeze(0)  # shape: [1, 1, H, W]
 
-    x = torch.as_tensor(param_map_full_np, dtype=torch.float32, device=device).unsqueeze(0).unsqueeze(0)
-    H, W = x.shape[-2:]
+    pixels_y, pixels_x = param_map_full.shape[-2:]
 
-    r = int(np.ceil(4 * float(sigma_eff)))
-    if r >= _max_reflect_radius(H, W):
-        raise ValueError(f"Gaussian radius r={r} exceeds reflect-pad limit for {H}x{W}.")
+    # Define kernel
+    max_sigma = max(sigma_pump, sigma_probe)
+    r = int(np.ceil(4 * max_sigma))
+    kernel = gaussian_kernel_2d(sigma_pump, sigma_probe, r).to(device)
+    kernel = kernel.unsqueeze(0).unsqueeze(0)  # shape: [1, 1, kH, kW]
 
-    kernel = gaussian_kernel_2d(sigma_eff, r).to(device).unsqueeze(0).unsqueeze(0)  # [1,1,kH,kW]
+    # Pad the input to keep edges valid
+    pad = [r, r, r, r]  # left, right, top, bottom
+    param_padded = F.pad(param_map_full, pad, mode='reflect')
 
-    x = F.pad(x, [r, r, r, r], mode='reflect')
-    smoothed = F.conv2d(x, kernel)
-
-    x_centers = torch.linspace(0, W-1, steps_x, device=device).round().long()
-    y_centers = torch.linspace(0, H-1, steps_y, device=device).round().long()
-
-    sampled = smoothed[0,0][y_centers[:,None], x_centers[None,:]]
-    return sampled.detach().cpu().numpy()
+    # Convolve (Gaussian smoothing)
+    smoothed = F.conv2d(param_padded, kernel)
 
 
 
+
+    # This just takes the coarse/convoluted version at pixels_y, pixels_x down to steps_y steps_x
+    # # Resize using bilinear interpolation to match desired downsampling
+    # smoothed_down = F.interpolate(smoothed, size=(steps_y, steps_x), mode='bilinear', align_corners=False)
+    
+    # return smoothed_down.squeeze().cpu().numpy()  # shape: [steps_y, steps_x]
+    
+    
+    # More directly similar to other codes, the convolution only at each x/y center is used to make steps_y, steps_x map.
+    # Compute sampling coordinates (center points)
+    x_centers = torch.linspace(0, pixels_x - 1, steps_x, device=device).round().long()
+    y_centers = torch.linspace(0, pixels_y - 1, steps_y, device=device).round().long()
+
+    # Sample directly from smoothed map
+    sampled = smoothed[0, 0][y_centers[:, None], x_centers[None, :]]
+    return sampled.cpu().numpy()
+
+
+
+
+
+def smooth_downsample_parallel(param_map_full, steps_y, steps_x, sigma_pump=50.0, sigma_probe=50.0, n_jobs=-1):
+    pixels_y, pixels_x = param_map_full.shape
+    ny, nx = steps_y, steps_x
+
+    x_centers = np.linspace(0, pixels_x - 1, steps_x)
+    y_centers = np.linspace(0, pixels_y - 1, steps_y)
+
+    max_sigma = max(sigma_pump, sigma_probe)
+    r = int(np.ceil(4 * max_sigma))
+    kernel_size = 2 * r + 1
+
+    Y_indices, X_indices = np.meshgrid(np.arange(-r, r + 1), np.arange(-r, r + 1), indexing='ij')
+    dist_sq = X_indices**2 + Y_indices**2
+
+    gaussian_pump = np.exp(-dist_sq / (2 * sigma_pump**2))
+    gaussian_probe = np.exp(-dist_sq / (2 * sigma_probe**2))
+    gaussian_weights = gaussian_pump * gaussian_probe
+
+    def process_pixel(i, j, yc, xc):
+        yc_i = int(round(yc))
+        xc_j = int(round(xc))
+
+        y_min = max(yc_i - r, 0)
+        y_max = min(yc_i + r + 1, pixels_y)
+        x_min = max(xc_j - r, 0)
+        x_max = min(xc_j + r + 1, pixels_x)
+
+        sub_map = param_map_full[y_min:y_max, x_min:x_max]
+
+        ky_min = r - (yc_i - y_min)
+        ky_max = r + (y_max - yc_i)
+        kx_min = r - (xc_j - x_min)
+        kx_max = r + (x_max - xc_j)
+
+        weights_crop = gaussian_weights[ky_min:ky_max, kx_min:kx_max]
+
+        weighted_sum = np.sum(weights_crop * sub_map)
+        total_weight = np.sum(weights_crop)
+        return i, j, weighted_sum / total_weight if total_weight > 0 else 0.0
+
+    # Generate all tasks
+    tasks = [
+        (i, j, yc, xc)
+        for i, yc in enumerate(y_centers)
+        for j, xc in enumerate(x_centers)
+    ]
+
+    # Run in parallel
+    results = Parallel(n_jobs=n_jobs)(delayed(process_pixel)(i, j, yc, xc) for i, j, yc, xc in tasks)
+
+    # Fill the output array
+    param_downsampled = np.zeros((ny, nx), dtype=np.float32)
+    for i, j, val in results:
+        param_downsampled[i, j] = val
+
+    return param_downsampled
+
+
+
+
+
+
+def smooth_downsample(param_map_full, steps_y, steps_x, sigma_pump=50.0, sigma_probe=50.0):
+    
+
+    # Downsample a full-resolution parameter map using finite-support Gaussian smoothing.
+    # Gaussian width is defined separately for pump and probe, and kernel support extends to 4 * sigma.
+
+    
+    # Extract how many pixels are in full resolution image
+    pixels_y, pixels_x = param_map_full.shape
+    
+    # Resolution of blurred (FEM/Experimental) image
+    ny, nx = steps_y, steps_x
+
+    # Create downsample grid
+    # Centers of high resolution image that map to blurred image
+    x_centers = np.linspace(0, pixels_x - 1, steps_x)
+    y_centers = np.linspace(0, pixels_y - 1, steps_y)
+
+    # Normalized Gaussian, gives weighting
+    # Kernel size: max sigma * 4 (truncate when Gaussian ~ 0)
+    max_sigma = max(sigma_pump, sigma_probe)
+    r = int(np.ceil(4 * max_sigma))  # half-width
+    kernel_size = 2 * r + 1          # force odd size so gaussian can be centered at each x_center/y_center
+
+    # Precompute distance grid
+    Y_indices, X_indices = np.meshgrid(np.arange(-r, r + 1), np.arange(-r, r + 1), indexing='ij')
+    dist_sq = X_indices**2 + Y_indices**2
+
+    # Separate pump and probe Gaussians
+    gaussian_pump = np.exp(-dist_sq / (2 * sigma_pump**2))
+    gaussian_probe = np.exp(-dist_sq / (2 * sigma_probe**2))
+    
+    # Element-wise multiplication, this is now a gaussian weighted kernel ready for use
+    gaussian_weights = gaussian_pump * gaussian_probe
+
+    # Output map
+    param_downsampled = np.zeros((ny, nx), dtype=np.float32)
+
+    for i, yc in enumerate(y_centers):
+        for j, xc in enumerate(x_centers):
+            
+            yc_i = int(round(yc))
+            xc_j = int(round(xc))
+
+            # Extract bounds from full image
+            y_min = max(yc_i - r, 0)
+            y_max = min(yc_i + r + 1, pixels_y)
+            x_min = max(xc_j - r, 0)
+            x_max = min(xc_j + r + 1, pixels_x)
+
+            # Extract valid region from full image
+            sub_map = param_map_full[y_min:y_max, x_min:x_max]
+
+            # Match kernel crop
+            ky_min = r - (yc_i - y_min)
+            ky_max = r + (y_max - yc_i)
+            kx_min = r - (xc_j - x_min)
+            kx_max = r + (x_max - xc_j)
+            weights_crop = gaussian_weights[ky_min:ky_max, kx_min:kx_max]
+
+            # Weighted smoothing
+            weighted_sum = np.sum(weights_crop * sub_map)
+            total_weight = np.sum(weights_crop)
+            param_downsampled[i, j] = weighted_sum / total_weight if total_weight > 0 else 0.0
+
+    return param_downsampled
 
 
 
@@ -215,14 +367,30 @@ if __name__ == "__main__":
     kappa_map_full[region_map == 1] = kappa_region_1
 
 
-    # Step 3: Apply Gaussian smoothing-based downsampling 
-    # Example: sigma_eff = 50 (pixels) for demo; in practice compute from normalized or calibrated value
+    # Step 3: Apply Gaussian smoothing-based downsampling
+    # kappa_downsampled = smooth_downsample(
+        # kappa_map_full,
+        # steps_y=31,
+        # steps_x=31,
+        # sigma_pump=50.0,
+        # sigma_probe=50.0
+    # )   
+    
+    # kappa_downsampled = smooth_downsample_parallel(
+        # kappa_map_full,
+        # steps_y=31,
+        # steps_x=31,
+        # sigma_pump=50.0,
+        # sigma_probe=50.0
+    # )   
+    
     kappa_downsampled = smooth_downsample_torch(
         kappa_map_full,
         steps_y=31,
         steps_x=31,
-        sigma_eff=50
-    )
+        sigma_pump=50,
+        sigma_probe=50
+    ) 
     
     # Global style settings for publication-quality figures
     mpl.rcParams.update({
